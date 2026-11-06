@@ -1949,76 +1949,40 @@ class Panel:
 
     def addTabOnlyMillFillets(self, millRadius):
         """
-        Add fillets to inner corners only at tab junctions. For each tab
-        corner, constructs a fillet patch polygon (corner + two edge points
-        + arc) and unions it with the board outline.
+        Simulate milling only where tabs meet the boards or the frame. Every
+        other inner corner, including the boards' own internal features, keeps
+        its original geometry.
+
+        Runs the same operation as addMillFillets on the whole panel outline,
+        then keeps only the added material that touches a tab.
         """
-        import math
-        if not hasattr(self, '_tabPolygons') or not self._tabPolygons:
+        if millRadius <= 0 or not self.forwardTabs:
             return
-        R = millRadius
-        filletPatches = []
-        for tab in self._tabPolygons:
-            coords = list(tab.exterior.coords)[:-1]
-            n = len(coords)
-            for i in range(n):
-                px, py = coords[i]
-                # Vectors along edges away from corner
-                v1x = coords[(i-1) % n][0] - px
-                v1y = coords[(i-1) % n][1] - py
-                v2x = coords[(i+1) % n][0] - px
-                v2y = coords[(i+1) % n][1] - py
-                len1 = (v1x**2 + v1y**2)**0.5
-                len2 = (v2x**2 + v2y**2)**0.5
-                if len1 == 0 or len2 == 0:
-                    continue
-                # Unit vectors along edges
-                u1x, u1y = v1x/len1, v1y/len1
-                u2x, u2y = v2x/len2, v2y/len2
-                # Points on edges at distance R from corner
-                ax, ay = px + R * u1x, py + R * u1y
-                bx, by = px + R * u2x, py + R * u2y
-                # Outward normals of arriving/leaving edges (CCW: right = (dy, -dx))
-                # Arriving edge direction is (dx1, dy1) = (px - prev_x, py - prev_y) = (-v1x, -v1y)
-                # Its outward normal: (-v1y/len1, v1x/len1)... wait, edge dir is (-v1x,-v1y)
-                # For edge from P[i-1] to P[i], direction = (px-prev_x, py-prev_y) = (-v1x, -v1y)
-                # Outward normal (right of direction for CCW): (-v1y/len1, v1x/len1)
-                n1x, n1y = -v1y/len1, v1x/len1
-                # For edge from P[i] to P[i+1], direction = (v2x, v2y)
-                # Outward normal: (v2y/len2, -v2x/len2)
-                n2x, n2y = v2y/len2, -v2x/len2
-                # Arc center: offset from corner by R along each outward normal
-                cx = px + R * (n1x + n2x)
-                cy = py + R * (n1y + n2y)
-                # Generate arc from A to B centered at C
-                angle_a = math.atan2(ay - cy, ax - cx)
-                angle_b = math.atan2(by - cy, bx - cx)
-                # Determine sweep direction using cross product
-                cross = (ax - cx) * (by - cy) - (ay - cy) * (bx - cx)
-                if cross >= 0:
-                    sweep = ((angle_b - angle_a) % (2 * math.pi))
-                else:
-                    sweep = -((angle_a - angle_b) % (2 * math.pi))
-                # Generate arc points
-                num_seg = 16
-                arc_pts = []
-                for j in range(num_seg + 1):
-                    angle = angle_a + sweep * j / num_seg
-                    arc_pts.append((cx + R * math.cos(angle), cy + R * math.sin(angle)))
-                # Build patch: corner -> A -> arc -> B -> corner
-                patch_coords = [(px, py), (ax, ay)] + arc_pts[1:-1] + [(bx, by), (px, py)]
-                patch = Polygon(patch_coords)
-                if patch.is_valid and patch.area > 0:
-                    filletPatches.append(patch)
-        if filletPatches:
-            fillets = shapely.ops.unary_union(filletPatches)
-            self.boardSubstrate.substrates = self.boardSubstrate.substrates.union(fillets)
-        holes = []
-        for s in self.substrates:
-            for int in s.interiors():
-                holes.append(Polygon(int.coords))
-        if holes:
-            self.boardSubstrate.cut(shapely.ops.unary_union(holes))
+        self.boardSubstrate.orient()
+        original = self.boardSubstrate.substrates
+        self.boardSubstrate.millFillets(millRadius)
+        added = self.boardSubstrate.substrates.difference(original)
+        self.boardSubstrate.substrates = original
+
+        # The difference contains zero-width slivers along edges that both
+        # outlines share, and they can join a tab fillet to an unrelated corner
+        # far away. Pick the pieces on a copy opened by SHP_EPSILON, which
+        # breaks the slivers, then take the exact geometry from the raw
+        # difference near those pieces. Opening trims each fillet's cusps over
+        # about 2 * sqrt(R * eps) of their length; restore twice that.
+        tabs = shapely.ops.unary_union(self.forwardTabs)
+        nearTabs = prep(tabs.buffer(fromMm(0.01)))
+        opened = added.buffer(-SHP_EPSILON).buffer(SHP_EPSILON)
+        seeds = [p for p in listGeometries(opened)
+                 if not p.is_empty and nearTabs.intersects(p)]
+        if not seeds:
+            return
+        margin = 4 * (millRadius * SHP_EPSILON) ** 0.5
+        region = shapely.ops.unary_union(seeds).buffer(margin)
+        fillets = [g for g in shapely.get_parts(added.intersection(region))
+                   if g.geom_type == "Polygon" and not g.is_empty]
+        self.boardSubstrate.union(fillets)
+        self.boardSubstrate.orient()
 
     def clearTabsAnnotations(self):
         """
@@ -2041,8 +2005,6 @@ class Panel:
             tabs.extend(t)
             cuts.extend(c)
         self.forwardTabs.extend(tabs)
-        # Save tab polygons for optional tab-only mill fillets
-        self._tabPolygons = list(tabs)
         self.boardSubstrate.union(tabs)
         return cuts
 

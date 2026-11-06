@@ -262,6 +262,9 @@ you need a custom tab placement (e.g., to avoid critical feature), see type
 - `vcount`, `hcount`: Number of tabs in a given direction.
 - `mindistance`: Minimal spacing between the tabs. If there are too many tabs,
   their count is reduced.
+- `tabspacing`: Fixed distance between neighbouring tabs. The tabs are centered
+  on the edge as a group instead of being spread over it. If the group does not
+  fit on the edge, the tabs are spaced uniformly.
 
 #### Spacing
 
@@ -587,6 +590,10 @@ Finishing touches to the panel.
   functionality.
 - `millradiusouter` ­– same as the previous one, modifies only board outer
   counter. No internal features of the board are affected.
+- `millradiustabonly` – same as `millradius`, but only rounds the inner corners
+  where tabs meet the boards or the frame. All other corners of the boards keep
+  their original shape. Only one of `millradius`, `millradiusouter` and
+  `millradiustabonly` can be used.
 - `reconstructarcs` - the panelization process works on top of a polygonal
   representation of the board. This options allows to reconstruct the arcs in
   the design before saving the panel.
