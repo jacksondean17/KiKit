@@ -186,6 +186,7 @@
         "reconstructarcs": false,
         "millradius": "0mm",
         "millradiusouter": "0mm",
+        "millradiustabonly": "0mm",
         "script": "",
         "scriptarg": "",
         "origin": "tl",

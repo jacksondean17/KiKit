@@ -398,11 +398,19 @@ def isBoardEdge(edge):
     """
     return isinstance(edge, pcbnew.PCB_SHAPE) and edge.GetLayer() == pcbnew.Edge_Cuts
 
-def tabSpacing(width, count):
+def tabSpacing(width, count, fixedSpacing=None):
     """
     Given a width of board edge and tab count, return an iterable with tab
-    offsets.
+    offsets. If fixedSpacing is given, tabs are centered as a group with that
+    exact spacing between them instead of being evenly distributed. If the
+    fixed spacing would place tabs outside the edge, falls back to even spacing.
     """
+    if fixedSpacing is not None and count > 1:
+        totalSpan = fixedSpacing * (count - 1)
+        if totalSpan < width:
+            center = width / 2
+            start = center - totalSpan / 2
+            return [start + fixedSpacing * i for i in range(count)]
     return [width * i / (count + 1) for i in range(1, count + 1)]
 
 def prolongCut(cut, prolongation):
@@ -1939,6 +1947,79 @@ class Panel:
                 holes.append(Polygon(int.coords))
         self.boardSubstrate.cut(shapely.ops.unary_union(holes))
 
+    def addTabOnlyMillFillets(self, millRadius):
+        """
+        Add fillets to inner corners only at tab junctions. For each tab
+        corner, constructs a fillet patch polygon (corner + two edge points
+        + arc) and unions it with the board outline.
+        """
+        import math
+        if not hasattr(self, '_tabPolygons') or not self._tabPolygons:
+            return
+        R = millRadius
+        filletPatches = []
+        for tab in self._tabPolygons:
+            coords = list(tab.exterior.coords)[:-1]
+            n = len(coords)
+            for i in range(n):
+                px, py = coords[i]
+                # Vectors along edges away from corner
+                v1x = coords[(i-1) % n][0] - px
+                v1y = coords[(i-1) % n][1] - py
+                v2x = coords[(i+1) % n][0] - px
+                v2y = coords[(i+1) % n][1] - py
+                len1 = (v1x**2 + v1y**2)**0.5
+                len2 = (v2x**2 + v2y**2)**0.5
+                if len1 == 0 or len2 == 0:
+                    continue
+                # Unit vectors along edges
+                u1x, u1y = v1x/len1, v1y/len1
+                u2x, u2y = v2x/len2, v2y/len2
+                # Points on edges at distance R from corner
+                ax, ay = px + R * u1x, py + R * u1y
+                bx, by = px + R * u2x, py + R * u2y
+                # Outward normals of arriving/leaving edges (CCW: right = (dy, -dx))
+                # Arriving edge direction is (dx1, dy1) = (px - prev_x, py - prev_y) = (-v1x, -v1y)
+                # Its outward normal: (-v1y/len1, v1x/len1)... wait, edge dir is (-v1x,-v1y)
+                # For edge from P[i-1] to P[i], direction = (px-prev_x, py-prev_y) = (-v1x, -v1y)
+                # Outward normal (right of direction for CCW): (-v1y/len1, v1x/len1)
+                n1x, n1y = -v1y/len1, v1x/len1
+                # For edge from P[i] to P[i+1], direction = (v2x, v2y)
+                # Outward normal: (v2y/len2, -v2x/len2)
+                n2x, n2y = v2y/len2, -v2x/len2
+                # Arc center: offset from corner by R along each outward normal
+                cx = px + R * (n1x + n2x)
+                cy = py + R * (n1y + n2y)
+                # Generate arc from A to B centered at C
+                angle_a = math.atan2(ay - cy, ax - cx)
+                angle_b = math.atan2(by - cy, bx - cx)
+                # Determine sweep direction using cross product
+                cross = (ax - cx) * (by - cy) - (ay - cy) * (bx - cx)
+                if cross >= 0:
+                    sweep = ((angle_b - angle_a) % (2 * math.pi))
+                else:
+                    sweep = -((angle_a - angle_b) % (2 * math.pi))
+                # Generate arc points
+                num_seg = 16
+                arc_pts = []
+                for j in range(num_seg + 1):
+                    angle = angle_a + sweep * j / num_seg
+                    arc_pts.append((cx + R * math.cos(angle), cy + R * math.sin(angle)))
+                # Build patch: corner -> A -> arc -> B -> corner
+                patch_coords = [(px, py), (ax, ay)] + arc_pts[1:-1] + [(bx, by), (px, py)]
+                patch = Polygon(patch_coords)
+                if patch.is_valid and patch.area > 0:
+                    filletPatches.append(patch)
+        if filletPatches:
+            fillets = shapely.ops.unary_union(filletPatches)
+            self.boardSubstrate.substrates = self.boardSubstrate.substrates.union(fillets)
+        holes = []
+        for s in self.substrates:
+            for int in s.interiors():
+                holes.append(Polygon(int.coords))
+        if holes:
+            self.boardSubstrate.cut(shapely.ops.unary_union(holes))
+
     def clearTabsAnnotations(self):
         """
         Remove all existing tab annotations from the panel.
@@ -1960,10 +2041,12 @@ class Panel:
             tabs.extend(t)
             cuts.extend(c)
         self.forwardTabs.extend(tabs)
+        # Save tab polygons for optional tab-only mill fillets
+        self._tabPolygons = list(tabs)
         self.boardSubstrate.union(tabs)
         return cuts
 
-    def _buildTabAnnotationForEdge(self, edge, dir, count, width):
+    def _buildTabAnnotationForEdge(self, edge, dir, count, width, fixedSpacing=None):
         """
         Given an edge as AxialLine, dir and count, return a list of
         annotations.
@@ -1972,9 +2055,9 @@ class Panel:
             abs(dir[0]) * edge.x + abs(dir[1]) * (edge.min + offset),
             abs(dir[1]) * edge.x + abs(dir[0]) * (edge.min + offset))
         return [TabAnnotation(None, pos(offset), dir, width)
-            for offset in tabSpacing(edge.length, count)]
+            for offset in tabSpacing(edge.length, count, fixedSpacing)]
 
-    def _buildTabAnnotations(self, countFn, widthFn, ghostSubstrates):
+    def _buildTabAnnotations(self, countFn, widthFn, ghostSubstrates, fixedSpacingFn=None):
         """
         Add tab annotations for the individual substrates based on their
         bounding boxes. Assign tabs annotations to the edges of the bounding
@@ -2000,11 +2083,12 @@ class Panel:
                         edge.min, edge.max = section.min, section.max
                         tWidth = widthFn(edge.length, dir)
                         tCount = countFn(edge.length, dir)
-                        a = self._buildTabAnnotationForEdge(edge, dir, tCount, tWidth)
+                        fSpacing = fixedSpacingFn(edge.length, dir) if fixedSpacingFn else None
+                        a = self._buildTabAnnotationForEdge(edge, dir, tCount, tWidth, fSpacing)
                         self.substrates[i].annotations.extend(a)
 
     def buildTabAnnotationsFixed(self, hcount, vcount, hwidth, vwidth,
-            minDistance, ghostSubstrates):
+            minDistance, ghostSubstrates, tabSpacing=None):
         """
         Add tab annotations for the individual substrates based on number of
         tabs in horizontal and vertical direction. You can specify individual
@@ -2012,6 +2096,9 @@ class Panel:
 
         If the edge is short for the specified number of tabs with given minimal
         spacing, the count is reduced.
+
+        If tabSpacing is given, tabs are centered as a group with that exact
+        spacing between them instead of being evenly distributed.
 
         You can also specify ghost substrates (for the future framing).
         """
@@ -2021,7 +2108,8 @@ class Panel:
             countLimit = abs(dir[0]) * hcount + abs(dir[1]) * vcount
             width = widthFn(edgeLength, dir)
             return min(countLimit, maxTabCount(edgeLength, width, minDistance))
-        return self._buildTabAnnotations(countFn, widthFn, ghostSubstrates)
+        fixedSpacingFn = (lambda edgeLength, dir: tabSpacing) if tabSpacing else None
+        return self._buildTabAnnotations(countFn, widthFn, ghostSubstrates, fixedSpacingFn)
 
 
     def buildTabAnnotationsSpacing(self, spacing, hwidth, vwidth, ghostSubstrates):

@@ -392,6 +392,9 @@ TABS_SECTION = {
     "mindistance": SLength(
         typeIn(["fixed", "plugin"]),
         "Minimal spacing between the tabs. If there are too many tabs, their count is reduced."),
+    "tabspacing": SLength(
+        typeIn(["fixed", "plugin"]),
+        "Fixed spacing between tabs. Tabs are centered as a group with this exact distance between them."),
     "spacing": SLength(
         typeIn(["spacing", "plugin"]),
         "The maximum spacing of the tabs."),
@@ -723,6 +726,9 @@ POST_SECTION = {
     "millradiusouter": SLength(
         always(),
         "Simulate milling operation only on the outer perimeter of boards"),
+    "millradiustabonly": SLength(
+        always(),
+        "Simulate milling operation only at tab junctions, preserving original board geometry"),
     "reconstructarcs": SBool(
         always(),
         "Try to reconstruct arcs"),

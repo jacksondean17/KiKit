@@ -294,7 +294,8 @@ def buildTabs(preset, panel, substrates, boundarySubstrates):
             panel.clearTabsAnnotations()
             panel.buildTabAnnotationsFixed(properties["hcount"],
                 properties["vcount"], properties["hwidth"], properties["vwidth"],
-                properties["mindistance"], boundarySubstrates)
+                properties["mindistance"], boundarySubstrates,
+                tabSpacing=properties.get("tabspacing"))
             return panel.buildTabsFromAnnotations(properties["fillet"])
         if type == "spacing":
             panel.clearTabsAnnotations()
@@ -676,12 +677,16 @@ def buildPostprocessing(preset, panel):
         type = preset["type"]
         if type != "auto":
             raise PresetError(f"Unknown type '{type}' of postprocessing specification.")
-        if preset["millradius"] > 0 and preset["millradiusouter"] > 0:
-            raise PresetError("You cannot specify both, millradius and millradiusouter")
+        millOptions = sum(1 for k in ["millradius", "millradiusouter", "millradiustabonly"]
+                         if preset.get(k, 0) > 0)
+        if millOptions > 1:
+            raise PresetError("You can only specify one of millradius, millradiusouter, or millradiustabonly")
         if preset["millradius"] > 0:
             panel.addMillFillets(preset["millradius"])
         if preset["millradiusouter"] > 0:
             panel.addTabMillFillets(preset["millradiusouter"])
+        if preset.get("millradiustabonly", 0) > 0:
+            panel.addTabOnlyMillFillets(preset["millradiustabonly"])
         if preset["copperfill"]:
             panel.copperFillNonBoardAreas()
         if preset["origin"]:
